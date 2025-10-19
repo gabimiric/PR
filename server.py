@@ -2,6 +2,7 @@ import os
 import sys
 import socket
 import mimetypes
+import urllib.parse
 
 # Usage: python server.py <directory> <port>
 
@@ -106,9 +107,8 @@ def handle_request(client_socket, base_dir):
         return
 
     # Normalize path to avoid path traversal
-    rel_path = path.lstrip('/')
+    rel_path = urllib.parse.unquote(path.lstrip('/'))
     abs_path = os.path.abspath(os.path.join(base_dir, rel_path))
-    base_dir_abs = os.path.abspath(base_dir)
 
     # Ensure path is within base_dir
     if not abs_path.startswith(os.path.abspath(base_dir)):
