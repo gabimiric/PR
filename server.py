@@ -33,19 +33,21 @@ def generate_directory_listing(directory, rel_path=""):
 
         full_path = os.path.join(directory, item)
         display_name = item + ('/' if os.path.isdir(full_path) else '')
-        link = os.path.join('/', rel_path, item).replace('\\', '/')
+        link = '/' + urllib.parse.quote(os.path.join(rel_path, item).replace('\\', '/'))
 
         if os.path.isdir(full_path):
             # Use <details> for collapsible folders
             html.append(f'<li><details><summary>{display_name}</summary>')
+            html.append('<ul>')
             html.append(generate_directory_listing(full_path, os.path.join(rel_path, item)))
-            html.append('</details></li>')
+            html.append('</ul></details></li>')
+
         else:
             # Only include files of these types
             if item.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.gif')):
                 html.append(f'<li><a href="{link}">{display_name}</a></li>')
 
-    return '\n'.join(html) # Return as a single string
+    return '\n'.join(html)  # Return as a single string
 
 # Serve the main index.html page and inject dynamic file list
 def serve_index_page(client_socket, base_dir):
@@ -106,6 +108,11 @@ def handle_request(client_socket, base_dir):
         client_socket.close()
         return
 
+    # Serve the main index page if root is requested
+    if path == "/" or path == "":
+        serve_index_page(client_socket, base_dir)
+        return
+
     # Normalize path to avoid path traversal
     rel_path = urllib.parse.unquote(path.lstrip('/'))
     abs_path = os.path.abspath(os.path.join(base_dir, rel_path))
@@ -119,10 +126,6 @@ def handle_request(client_socket, base_dir):
         client_socket.close()
         return
 
-    # Serve the main index page if root is requested
-    if path == "/" or path == "":
-        serve_index_page(client_socket, base_dir)
-        return
 
     # Normalize requested path to prevent path traversal
     if os.path.isdir(abs_path):
