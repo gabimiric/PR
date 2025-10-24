@@ -3,6 +3,20 @@ import sys
 import socket
 import mimetypes
 import urllib.parse
+import threading
+import time
+import concurrent
+
+from collections import defaultdict
+from collections import deque
+
+request_counts = defaultdict(int)
+counter_lock = threading.Lock()
+
+RATE_LIMIT = 5  # max requests per second
+rate_limit_window = 1  # seconds
+client_requests = defaultdict(lambda: deque())
+rate_lock = threading.Lock()
 
 # Usage: python server.py <directory> <port>
 
@@ -27,9 +41,13 @@ def generate_directory_listing(directory, rel_path=""):
     items = sorted(os.listdir(directory))
     html = []
 
+    # Get a thread-safe snapshot of the current request counts
+    with counter_lock:
+        current_counts = request_counts.copy()
+
     for item in items:
         if item == "index.html":
-            continue # Skip index.html from the listing
+            continue  # Skip index.html from the listing
 
         full_path = os.path.join(directory, item)
         display_name = item + ('/' if os.path.isdir(full_path) else '')
@@ -45,10 +63,12 @@ def generate_directory_listing(directory, rel_path=""):
         else:
             # Only include files of these types
             if item.lower().endswith(('.pdf', '.png', '.jpg', '.jpeg', '.gif')):
-                html.append(f'<li><a href="{link}">{display_name}</a></li>')
+                # Get count from our thread-safe snapshot
+                rel_file_path = os.path.join(rel_path, item)
+                count = current_counts.get(rel_file_path, 0)
+                html.append(f'<li><a href="{link}">{display_name}</a> — {count} requests</li>')
 
     return '\n'.join(html)  # Return as a single string
-
 # Serve the main index.html page and inject dynamic file list
 def serve_index_page(client_socket, base_dir):
     index_file = os.path.join(base_dir, "index.html")
@@ -89,6 +109,27 @@ def handle_request(client_socket, base_dir):
         client_socket.close()
         return
 
+    # Rate limiting
+    client_ip = client_socket.getpeername()[0]
+    now = time.time()
+
+    with rate_lock:
+        reqs = client_requests[client_ip]
+        # Remove timestamps older than 1 second
+        while reqs and now - reqs[0] > rate_limit_window:
+            reqs.popleft()
+
+        if len(reqs) >= RATE_LIMIT:
+            # Too many requests
+            response_body = b'429 Too Many Requests'
+            response = build_header(429, 'text/plain', len(response_body)) + response_body
+            client_socket.sendall(response)
+            client_socket.close()
+            return
+
+        # Record this request timestamp
+        reqs.append(now)
+
     # Debug prints
     print("Base directory:", os.path.abspath(base_dir))
     print("Raw request:", request.decode())
@@ -126,16 +167,22 @@ def handle_request(client_socket, base_dir):
         client_socket.close()
         return
 
-
     # Normalize requested path to prevent path traversal
     if os.path.isdir(abs_path):
-        ## Return a recursive directory listing for folders
+        # Return a recursive directory listing for folders
         body = generate_directory_listing(abs_path, rel_path).encode('utf-8')
         header = build_header(200, 'text/html; charset=utf-8', len(body))
         client_socket.sendall(header + body)
 
     elif os.path.isfile(abs_path):
         # Serve the file with the correct MIME type
+        #time.sleep(1)  # Simulate 1 second of work
+
+        # Update request count for this file (thread-safe)
+        with counter_lock:
+            rel_file_path = os.path.relpath(abs_path, base_dir)
+            request_counts[rel_file_path] = request_counts.get(rel_file_path, 0) + 1
+
         mime_type, _ = mimetypes.guess_type(abs_path)
         if not (mime_type and (
                 mime_type.startswith('text/html') or mime_type == 'image/png' or mime_type == 'application/pdf')):
@@ -158,31 +205,38 @@ def handle_request(client_socket, base_dir):
 
 # Main server loop
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python server.py <directory> <port>")
+    if len(sys.argv) < 2:
+        print("Usage: python server.py <base_directory> [port]")
         sys.exit(1)
 
     base_dir = sys.argv[1]
-    port = int(sys.argv[2])
-
-    if not os.path.isdir(base_dir):
-        print(f"Error: {base_dir} is not a directory")
-        sys.exit(1)
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_socket.bind(('0.0.0.0', port))
-    server_socket.listen(1)
+    server_socket.listen(5)
+    print(f"Server listening on port {port}...")
 
-    print(f"Serving {base_dir} on port {port}...")
+    # Initialize client_requests if needed
+    global client_requests
+    if not isinstance(client_requests, dict):
+        client_requests = {}
 
     try:
         while True:
-            client_socket, client_addr = server_socket.accept()
-            print(f"Connection from {client_addr}")
-            handle_request(client_socket, base_dir)
+            client_socket, addr = server_socket.accept()
+            print(f"Connection from {addr}")
+
+            # Create a new thread to handle the client request
+            client_thread = threading.Thread(
+                target=handle_request,
+                args=(client_socket, base_dir),
+                daemon=True  # This allows the thread to be terminated when main program exits
+            )
+            client_thread.start()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        print("Server shutting down...")
     finally:
         server_socket.close()
 
