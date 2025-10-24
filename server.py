@@ -24,7 +24,8 @@ rate_lock = threading.Lock()
 def build_header(status_code, content_type=None, content_length=0):
     status_messages = {
         200: "OK",
-        404: "Not Found"
+        404: "Not Found",
+        429: "Too Many Requests"
     }
     reason = status_messages.get(status_code, "Unknown")
     header = f"HTTP/1.1 {status_code} {reason}\r\n"
