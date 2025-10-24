@@ -18,6 +18,10 @@ rate_limit_window = 1  # seconds
 client_requests = defaultdict(lambda: deque())
 rate_lock = threading.Lock()
 
+# Configuration
+NAIVE_MODE = False  # Set to True to demonstrate race condition
+SIMULATE_WORK = False  # Set to True to add 1-second delay for testing
+
 # Usage: python server.py <directory> <port>
 
 # Build HTTP response headers
@@ -177,12 +181,23 @@ def handle_request(client_socket, base_dir):
 
     elif os.path.isfile(abs_path):
         # Serve the file with the correct MIME type
-        #time.sleep(1)  # Simulate 1 second of work
+        if SIMULATE_WORK:
+            time.sleep(1)  # Simulate 1 second of work
 
-        # Update request count for this file (thread-safe)
-        with counter_lock:
+        # Update request count for this file
+        if NAIVE_MODE:
+            # RACE CONDITION
             rel_file_path = os.path.relpath(abs_path, base_dir)
-            request_counts[rel_file_path] = request_counts.get(rel_file_path, 0) + 1
+            current_count = request_counts.get(rel_file_path, 0)
+            time.sleep(0.001)
+            request_counts[rel_file_path] = current_count + 1
+            print(
+                f"[Thread {threading.current_thread().name}] Updated {rel_file_path} to {request_counts[rel_file_path]}")
+        else:
+            # THREAD-SAFE
+            with counter_lock:
+                rel_file_path = os.path.relpath(abs_path, base_dir)
+                request_counts[rel_file_path] = request_counts.get(rel_file_path, 0) + 1
 
         mime_type, _ = mimetypes.guess_type(abs_path)
         if not (mime_type and (
