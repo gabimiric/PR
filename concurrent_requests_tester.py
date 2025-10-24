@@ -3,6 +3,7 @@ import concurrent.futures
 import requests
 import sys
 
+# Usage: python concurrent_requests_tester.py <server_url>
 
 def make_request(url, session):
     start = time.time()
@@ -15,7 +16,7 @@ def make_request(url, session):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python concurrent_test.py <server_url>")
+        print("Usage: python concurrent_requests_tester.py <server_url>")
         sys.exit(1)
 
     base_url = sys.argv[1]
