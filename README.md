@@ -1,102 +1,147 @@
 # Network Programming
 
-### Lab 1
+### Lab 1 - Multithreading & Concurrency
 ### Miricinschi Gabriel
 
-## To start container
-```
-docker-compose up --build -d
-```
+## Overview
+This lab extends the HTTP server from Lab 0 with:
+- **Multithreading**: Handle multiple requests concurrently
+- **Request Counter**: Track requests per file with thread-safe implementation
+- **Rate Limiting**: Limit requests per client IP (5 req/s)
 
-## Contents of source directory
-```
-server.py
-client.py
-Dockerfile
-docker-compose.yml
-index.html
-content/
-  ├─ books/
-  │ ├─ book1.pdf
-  │ └─ book2.pdf
-  ├─ labs/
-  │ ├─ Labs.pdf
-  │ └─ image.png
-  └─ images/
-  └─ cover.png
+## Changes from Lab 0
+
+### 1. Multithreading Implementation
+
+#### Modified `server.py` main loop:
+```python
+            # Create a new thread to handle the client request
+            client_thread = threading.Thread(
+                target=handle_request,
+                args=(client_socket, base_dir),
+                daemon=True  # This allows the thread to be terminated when main program exits
+            )
+            client_thread.start()
 ```
 
-## Docker compose file + dockerfile
-```yml
-version: '3.8'
-services:
-  pdf-server:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./content:/app/content
-```
-```yml
-# Use a lightweight Python image
-FROM python:3.13-slim
-
-# Set working directory inside the container
-WORKDIR /app
-
-# Copy the server script and content
-COPY server.py .
-COPY content ./content
-
-# Expose the port the server uses
-EXPOSE 8000
-
-# Run the server with the content folder as argument
-CMD ["python", "server.py", "content", "8000"]
+#### Added 1-second delay to simulate work:
+```python
+    elif os.path.isfile(abs_path):
+        # Serve the file with the correct MIME type
+        if SIMULATE_WORK:
+            time.sleep(1)  # Simulate 1 second of work
 ```
 
-## Command that runs the server inside the container
-```
- python server.py content 8000
-```
+### 2. Request Counter with Thread Safety
 
-## Contents of the served directory
-```
-content/
-  ├─ books/
-  │   ├─ book1.pdf
-  │   └─ book2.pdf
-  ├─ labs/
-  │   ├─ Labs.pdf
-  │   └─ image.png
-  └─ images/
-      └─ cover.png
+#### Thread-safe counter implementation:
+```python
+request_counts = defaultdict(int)
+counter_lock = threading.Lock()
+
+# When serving a file:
+with counter_lock:
+    rel_file_path = os.path.relpath(abs_path, base_dir)
+    request_counts[rel_file_path] = request_counts.get(rel_file_path, 0) + 1
 ```
 
-## Requests of 4 files in the browser
-### Inexistent file (404)
-<img width="1234" height="933" alt="image" src="https://github.com/user-attachments/assets/c8aa09b6-e673-4324-a0d5-a8ef481d703b" />
+#### Display in directory listing:
+```python
+count = current_counts.get(rel_file_path, 0)
+html.append(f'<li><a href="{link}">{display_name}</a> — {count} requests</li>')
+```
 
-### HTML file with image
-<img width="1234" height="938" alt="image" src="https://github.com/user-attachments/assets/341ff60f-b243-4903-ac1b-e49bf1f84f90" />
+### 3. Rate Limiting Implementation
 
-### PDF file
-<img width="1235" height="937" alt="image" src="https://github.com/user-attachments/assets/574d1d00-2689-466e-ac1e-666ef2b64bf0" />
+```python
+RATE_LIMIT = 5  # max requests per second
+rate_limit_window = 1  # seconds
+client_requests = defaultdict(lambda: deque())
+rate_lock = threading.Lock()
 
-### PNG file
-<img width="1234" height="936" alt="image" src="https://github.com/user-attachments/assets/adf0e1a5-1815-44e7-b6d6-41bc0461463a" />
+# In handle_request():
+    with rate_lock:
+        reqs = client_requests[client_ip]
+        # Remove timestamps older than 1 second
+        while reqs and now - reqs[0] > rate_limit_window:
+            reqs.popleft()
 
-## Client Run + Output and saved files
-<img width="752" height="748" alt="image" src="https://github.com/user-attachments/assets/748a5030-7db1-40c8-8512-f1b38f376106" />
-<img width="831" height="39" alt="image" src="https://github.com/user-attachments/assets/a365ec8c-5845-4e33-8d40-ab28556db9ff" />
-<img width="303" height="360" alt="image" src="https://github.com/user-attachments/assets/d88aaee7-c5da-436e-b6e6-da3d881c4ffa" />
+        if len(reqs) >= RATE_LIMIT:
+            # Too many requests
+            response_body = b'429 Too Many Requests'
+            response = build_header(429, 'text/plain', len(response_body)) + response_body
+            client_socket.sendall(response)
+            client_socket.close()
+            return
 
-## Directory listing generated page
-### Raw directory sublist
-<img width="271" height="127" alt="image" src="https://github.com/user-attachments/assets/5359312b-83da-43d9-868d-78b824d78589" />
+        # Record this request timestamp
+        reqs.append(now)
+```
 
-### All sublists injected into main index
-<img width="360" height="612" alt="image" src="https://github.com/user-attachments/assets/98c203fe-e0f9-42f6-9372-359fd4065554" />
+## Testing Scripts
+
+### 1. concurrent_requests_tester.py  
+1. Sends multiple requests simultaneously to test server performance and concurrency.
+2. Measures total time, request times, throughput, and enforces rate limits.
+
+**Usage:**
+```bash
+python concurrent_requests_tester.py http://localhost:8000/books/HellScream.pdf
+```
+
+### 2. rate_limit_tester.py
+1. Limits each client IP to a set number of requests per second (e.g., 5 req/s).
+2. Ensures that clients exceeding the limit receive HTTP 429 responses, protecting the server from overload.
+
+```bash
+python rate_limit_tester.py http://localhost:8000/books/HellScream.pdf 
+```
+
+## Test Results
+
+### Part 1: Performance Test for both servers with concurrency
+
+#### Single-thread server.py (lab 0)
+
+<img width="975" height="111" alt="image" src="https://github.com/user-attachments/assets/252d690c-68cc-400e-a7de-a62eab5182a6" />
+
+#### Multithread server.py (lab 1)
+
+<img width="964" height="114" alt="image" src="https://github.com/user-attachments/assets/3b13a740-0fa6-4347-bed6-e111bb9e8dfb" />
+
+**Analysis:**
+- **Single-Thread**: ALl requests succesful done in ~10 seconds (sequential with 1 req/s)
+- **Multithread**: All requests done in ~1.05 seconds (half of them falling due to rate limiting)
+  
+---
+
+### Part 2: Counter Race Condition Test
+Tested by running concurrent_requests_tester.py 3 times (5 valid requests x 3 = 15)
+#### Test with naive counter (no lock):
+
+<img width="364" height="563" alt="image" src="https://github.com/user-attachments/assets/d9f3a1c4-0a74-4017-9bbf-c552c9cf7f2a" />
+
+#### Test with naive counter off:
+
+<img width="371" height="534" alt="image" src="https://github.com/user-attachments/assets/2ed5c54c-c184-4dee-b08d-fa169ad6ad9b" />
+
+**Analysis:** 
+- **Without lock**: Race condition causes lost updates (4/15 counted)
+- **With lock**: All 15 requests counted correctly
+
+---
+
+### Part 3: Rate Limiting Test
+
+<img width="888" height="834" alt="image" src="https://github.com/user-attachments/assets/7208351c-3ed7-405a-8dbc-d8364bd23626" />
+<img width="487" height="270" alt="image" src="https://github.com/user-attachments/assets/75c4411d-0870-4a07-9bed-40dc48ec0540" />
 
 
 
+
+
+**Screenshot:** [Insert screenshot of rate limit test output]
+
+**Analysis:**
+- **Spammer** (unlimited rate): Successfully sent only ~5 req/s, with 45 requests blocked (429 status)
+- **Controlled** (4 req/s): All requests succesful
