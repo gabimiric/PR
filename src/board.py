@@ -31,7 +31,7 @@ class PlayerState:
 class Board:
     """
     Mutable and concurrency-safe Memory Scramble game board.
-    
+
     A Board represents a grid of cards that players can flip over to find matches.
     Multiple players can interact with the board concurrently.
     """
@@ -39,7 +39,7 @@ class Board:
     def __init__(self, rows: int, cols: int, cards: list[str]):
         """
         Create a new board with the given dimensions and cards.
-        
+
         Args:
             rows: Number of rows in the board (positive integer)
             cols: Number of columns in the board (positive integer)
@@ -112,10 +112,10 @@ class Board:
     async def look(self, player_id: str) -> str:
         """
         Get the current state of the board from a player's perspective.
-        
+
         Args:
             player_id: ID of the player looking at the board
-            
+
         Returns:
             String representation of the board state
         """
@@ -141,58 +141,40 @@ class Board:
         return "\n".join(lines)
 
     async def flip(self, player_id: str, row: int, col: int) -> str:
-        """
-        Flip a card at the given position following game rules.
-        
-        Args:
-            player_id: ID of the player making the flip
-            row: Row index of card to flip
-            col: Column index of card to flip
-            
-        Returns:
-            Updated board state from player's perspective
-            
-        Raises:
-            ValueError: If the flip operation fails
-        """
-        # Validate position
+        """Flip a card for a player, following rules 1-A to 2-E, 3-A/B."""
         if not (0 <= row < self._rows and 0 <= col < self._cols):
             raise ValueError(f"Invalid position ({row}, {col})")
 
         async with self._lock:
-            # Initialize player state if needed
             if player_id not in self._players:
                 self._players[player_id] = PlayerState()
-
             player_state = self._players[player_id]
 
-            # Handle cleanup from previous move (rules 3-A and 3-B)
-            await self._cleanup_previous_move(player_id)
+            # Finish previous move (3-A / 3-B) ONLY if we have a complete move
+            if player_state.first_card is not None and player_state.second_card is not None:
+                await self._cleanup_previous_move(player_id)
 
             card = self._board[row][col]
 
-            # Rule 1-A: No card at this position
+            # Rule 1-A / 2-A: Check card exists
             if card is None:
+                if player_state.first_card:
+                    self._relinquish_card(player_state.first_card)
+                    player_state.first_card = None
                 raise ValueError("No card at this position")
 
             # First card flip
             if player_state.first_card is None:
-                # Rule 1-D: Wait if card is controlled by another player
+                pos = (row, col)
+
+                # Wait if controlled by another player
                 while card.state == CardState.CONTROLLED and card.controller != player_id:
-                    # Set up condition variable if not exists
-                    pos = (row, col)
                     if pos not in self._card_available:
                         self._card_available[pos] = asyncio.Condition(self._lock)
-
-                    condition = self._card_available[pos]
-                    await condition.wait()
-
-                    # Re-check card state after waiting
+                    await self._card_available[pos].wait()
                     card = self._board[row][col]
-                    if card is None:
-                        raise ValueError("Card was removed while waiting")
 
-                # Rule 1-B and 1-C: Take control of the card
+                # Take control (Rule 1-B, 1-C)
                 card.state = CardState.CONTROLLED
                 card.controller = player_id
                 player_state.first_card = (row, col)
@@ -202,171 +184,128 @@ class Board:
                 return self._format_board(player_id)
 
             # Second card flip
-            else:
-                # Rule 2-A: No card at this position
-                if card is None:
-                    # Relinquish control of first card
-                    self._relinquish_card(player_state.first_card)
-                    player_state.first_card = None
-                    self._notify_watchers()
-                    self._check_rep()
-                    raise ValueError("No card at this position")
+            first_pos = player_state.first_card
+            first_card = self._board[first_pos[0]][first_pos[1]]
 
-                # Rule 2-B: Card is controlled (deadlock avoidance)
-                if card.state == CardState.CONTROLLED:
-                    # Relinquish control of first card
-                    self._relinquish_card(player_state.first_card)
-                    player_state.first_card = None
-                    self._notify_watchers()
-                    self._check_rep()
-                    raise ValueError("Card is already controlled")
+            # Cannot flip same card twice
+            if (row, col) == first_pos:
+                raise ValueError("Cannot flip the same card twice")
 
-                # Rule 2-C: Turn card face up if needed
-                if card.state == CardState.DOWN:
-                    card.state = CardState.UP
-
-                # Get first card
-                first_row, first_col = player_state.first_card
-                first_card = self._board[first_row][first_col]
-
-                # Rule 2-D and 2-E: Check for match
-                if first_card.value == card.value:
-                    # Matching pair! Take control of second card
-                    card.state = CardState.CONTROLLED
-                    card.controller = player_id
-                    player_state.second_card = (row, col)
-                    player_state.matched = True
-                else:
-                    # No match - relinquish control of both
-                    self._relinquish_card(player_state.first_card)
-                    player_state.first_card = None
-                    player_state.matched = False
-
-                self._notify_watchers()
-                self._check_rep()
-                return self._format_board(player_id)
-
-    async def _cleanup_previous_move(self, player_id: str) -> None:
-        """Clean up cards from player's previous move (rules 3-A and 3-B)."""
-        player_state = self._players[player_id]
-
-        # Rule 3-A: Remove matched pair
-        if player_state.matched and player_state.first_card and player_state.second_card:
-            self._remove_card(player_state.first_card)
-            self._remove_card(player_state.second_card)
-            player_state.first_card = None
-            player_state.second_card = None
-            player_state.matched = False
-
-        # Rule 3-B: Turn down non-matching cards
-        elif not player_state.matched:
-            if player_state.first_card:
-                self._turn_down_if_possible(player_state.first_card)
+            card = self._board[row][col]
+            if card is None:
+                self._relinquish_card(first_pos)
                 player_state.first_card = None
-            if player_state.second_card:
-                self._turn_down_if_possible(player_state.second_card)
-                player_state.second_card = None
+                raise ValueError("No card at this position")
 
-    def _relinquish_card(self, position: tuple[int, int]) -> None:
-        """Relinquish control of a card, leaving it face up."""
-        row, col = position
-        card = self._board[row][col]
-        if card and card.state == CardState.CONTROLLED:
-            card.state = CardState.UP
-            card.controller = None
+            # Rule 2-B: If card is controlled by a player, fail (no waiting)
+            if card.state == CardState.CONTROLLED:
+                self._relinquish_card(first_pos)
+                player_state.first_card = None
+                raise ValueError("Card is controlled by another player")
 
-            # Notify waiting players
-            if position in self._card_available:
-                self._card_available[position].notify_all()
+            # Turn face up if needed (Rule 2-C)
+            if card.state == CardState.DOWN:
+                card.state = CardState.UP
 
-    def _remove_card(self, position: tuple[int, int]) -> None:
-        """Remove a card from the board."""
-        row, col = position
-        self._board[row][col] = None
+            # Now control the second card
+            card.state = CardState.CONTROLLED
+            card.controller = player_id
+            player_state.second_card = (row, col)
 
-        # Notify waiting players
-        if position in self._card_available:
-            self._card_available[position].notify_all()
-
-    def _turn_down_if_possible(self, position: tuple[int, int]) -> None:
-        """Turn a card face down if it's not controlled by another player."""
-        row, col = position
-        card = self._board[row][col]
-        if card and card.state == CardState.UP:
-            card.state = CardState.DOWN
-
-    async def map_cards(self, player_id: str, f) -> str:
-        """
-        Replace all cards on the board using function f, maintaining pairwise consistency.
-        
-        Args:
-            player_id: ID of the player applying the map
-            f: Async function that maps card values to new card values
-            
-        Returns:
-            Updated board state from player's perspective
-        """
-        async with self._lock:
-            # Build mapping of old values to new values
-            card_mapping: dict[str, str] = {}
-
-            for row in self._board:
-                for card in row:
-                    if card and card.value not in card_mapping:
-                        card_mapping[card.value] = await f(card.value)
-
-            # Apply mapping to all cards atomically
-            for row in self._board:
-                for card in row:
-                    if card:
-                        card.value = card_mapping[card.value]
+            # Match check (Rule 2-D / 2-E)
+            if first_card.value == card.value:
+                player_state.matched = True
+            else:
+                # 2-E: Mismatch - relinquish both
+                self._relinquish_card(first_pos)
+                player_state.first_card = None
+                player_state.matched = False
 
             self._notify_watchers()
             self._check_rep()
             return self._format_board(player_id)
 
-    async def watch(self, player_id: str) -> str:
-        """
-        Wait for a change to the board, then return the updated state.
-        
-        Args:
-            player_id: ID of the player watching
-            
-        Returns:
-            Updated board state after a change occurs
-        """
-        future: asyncio.Future[str] = asyncio.Future()
+    def _remove_card(self, pos: tuple):
+        """Remove a card from the board."""
+        r, c = pos
+        if 0 <= r < len(self._board) and 0 <= c < len(self._board[0]):
+            self._board[r][c] = None
 
+    async def _cleanup_previous_move(self, player_id: str):
+        """Cleanup after previous move (must be called within lock)."""
+        state = self._players[player_id]
+
+        if state.matched and state.first_card and state.second_card:
+            # 3-A: Remove matched cards
+            r1, c1 = state.first_card
+            r2, c2 = state.second_card
+
+            # Notify waiting players before removing cards
+            for pos in [state.first_card, state.second_card]:
+                if pos in self._card_available:
+                    self._card_available[pos].notify_all()
+
+            self._board[r1][c1] = None
+            self._board[r2][c2] = None
+            state.first_card = None
+            state.second_card = None
+            state.matched = False
+        elif state.first_card or state.second_card:
+            # 3-B: Turn down unmatched cards
+            for pos in [state.first_card, state.second_card]:
+                if pos:
+                    r, c = pos
+                    card = self._board[r][c]
+                    if card:
+                        card.state = CardState.DOWN
+                        card.controller = None
+                        # Notify waiting players that this card is now available
+                        if pos in self._card_available:
+                            self._card_available[pos].notify_all()
+            state.first_card = None
+            state.second_card = None
+
+    def _relinquish_card(self, pos: tuple[int, int]):
+        """Relinquish control of a card (must be called within lock)."""
+        row, col = pos
+        card = self._board[row][col]
+        if card and card.state == CardState.CONTROLLED:
+            card.state = CardState.UP
+            card.controller = None
+            # Notify waiting players
+            if pos in self._card_available:
+                self._card_available[pos].notify_all()
+
+    def _notify_watchers(self):
+        """Notify watchers with actual board state."""
+        for watcher in self._watchers:
+            if not watcher.done():
+                watcher.set_result("")  # can update with actual board if needed
+        self._watchers.clear()
+
+    async def watch(self, player_id: str) -> str:
+        future = asyncio.Future()
         async with self._lock:
             self._watchers.add(future)
-
         try:
-            return await future
+            await future
+            async with self._lock:
+                return self._format_board(player_id)
         finally:
             async with self._lock:
                 self._watchers.discard(future)
-
-    def _notify_watchers(self) -> None:
-        """Notify all watchers that the board has changed."""
-        for watcher in self._watchers:
-            if not watcher.done():
-                # Create board state for each watcher
-                # Note: We can't determine player_id here, so we'll use empty string
-                # The watch command will need to handle this
-                watcher.set_result("")
-        self._watchers.clear()
 
     @staticmethod
     async def parse_from_file(filename: str) -> 'Board':
         """
         Create a new board by parsing a file.
-        
+
         Args:
             filename: Path to game board file
-            
+
         Returns:
             A new board with the size and cards from the file
-            
+
         Raises:
             ValueError: If the file format is invalid
             FileNotFoundError: If the file cannot be read
