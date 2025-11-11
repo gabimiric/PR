@@ -19,13 +19,15 @@ class Card:
     state: CardState
     controller: Optional[str] = None  # Player ID who controls this card
 
-
 @dataclass
 class PlayerState:
     """Tracks a player's current game state."""
-    first_card: Optional[tuple[int, int]] = None  # (row, col) of first card
-    second_card: Optional[tuple[int, int]] = None  # (row, col) of second card
+    first_card: Optional[tuple[int, int]] = None  # (row, col) of first card (currently controlled)
+    second_card: Optional[tuple[int, int]] = None  # (row, col) of second card (currently controlled)
     matched: bool = False  # Whether the last pair matched
+    # Positions of cards that were relinquished after a mismatch and left face-up.
+    pending_first_card: Optional[tuple[int, int]] = None
+    pending_second_card: Optional[tuple[int, int]] = None
 
 
 class Board:
@@ -150,9 +152,28 @@ class Board:
                 self._players[player_id] = PlayerState()
             player_state = self._players[player_id]
 
-            # Finish previous move (3-A / 3-B) ONLY if we have a complete move
+            # If the player has a previous completed pair stored, finish its cleanup
             if player_state.first_card is not None and player_state.second_card is not None:
                 await self._cleanup_previous_move(player_id)
+
+            # If the player has pending relinquished cards (from a previous mismatch),
+            # and they are starting a new move (no current controlled first_card),
+            # turn those pending face-up cards back down now.
+            if player_state.first_card is None and (
+                    player_state.pending_first_card or player_state.pending_second_card):
+                for pos in [player_state.pending_first_card, player_state.pending_second_card]:
+                    if pos:
+                        r, c = pos
+                        # card may have been removed meanwhile
+                        if 0 <= r < self._rows and 0 <= c < self._cols:
+                            card = self._board[r][c]
+                            if card and card.state == CardState.UP:
+                                card.state = CardState.DOWN
+                                card.controller = None
+                                if pos in self._card_available:
+                                    self._card_available[pos].notify_all()
+                player_state.pending_first_card = None
+                player_state.pending_second_card = None
 
             card = self._board[row][col]
 
@@ -167,17 +188,27 @@ class Board:
             if player_state.first_card is None:
                 pos = (row, col)
 
-                # Wait if controlled by another player
-                while card.state == CardState.CONTROLLED and card.controller != player_id:
+                # Wait if controlled by another player, and re-check if the card was removed
+                while True:
+                    card = self._board[row][col]
+                    if card is None:
+                        # Card disappeared while waiting -> fail as per Rule 2-A
+                        if player_state.first_card:
+                            self._relinquish_card(player_state.first_card)
+                            player_state.first_card = None
+                        raise ValueError("No card at this position")
+
+                    if not (card.state == CardState.CONTROLLED and card.controller != player_id):
+                        break
+
                     if pos not in self._card_available:
                         self._card_available[pos] = asyncio.Condition(self._lock)
                     await self._card_available[pos].wait()
-                    card = self._board[row][col]
 
-                # Take control (Rule 1-B, 1-C)
+                # Take control (Rule 1-B / 1-C)
                 card.state = CardState.CONTROLLED
                 card.controller = player_id
-                player_state.first_card = (row, col)
+                player_state.first_card = pos
 
                 self._notify_watchers()
                 self._check_rep()
@@ -200,7 +231,9 @@ class Board:
             # Rule 2-B: If card is controlled by a player, fail (no waiting)
             if card.state == CardState.CONTROLLED:
                 self._relinquish_card(first_pos)
+                # Store the relinquished card so it gets turned down on next first flip
                 player_state.first_card = None
+                player_state.pending_first_card = first_pos
                 raise ValueError("Card is controlled by another player")
 
             # Turn face up if needed (Rule 2-C)
@@ -216,11 +249,15 @@ class Board:
             if first_card.value == card.value:
                 player_state.matched = True
             else:
-                # 2-E: Mismatch - relinquish both cards
+                # 2-E: Mismatch - relinquish both cards, remember their positions as pending
                 self._relinquish_card(first_pos)
-                self._relinquish_card((row, col))  # Add this line to relinquish second card
+                self._relinquish_card((row, col))
+                # Clear controlled references (cards are no longer controlled)
                 player_state.first_card = None
-                player_state.second_card = None  # Also clear second_card reference
+                player_state.second_card = None
+                # Save pending positions so they'll be turned down on next first flip
+                player_state.pending_first_card = first_pos
+                player_state.pending_second_card = (row, col)
                 player_state.matched = False
 
             self._notify_watchers()
