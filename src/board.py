@@ -36,11 +36,56 @@ class Board:
 
     A Board represents a grid of cards that players can flip over to find matches.
     Multiple players can interact with the board concurrently.
+
+    Representation Invariant:
+    - _rows > 0 and _cols > 0
+    - len(_board) == _rows
+    - For all rows in _board: len(row) == _cols
+    - For all cards in _board:
+        * If card is not None:
+            - card.value is non-empty and contains no whitespace
+            - If card.state == CONTROLLED, then card.controller is not None
+            - If card.state != CONTROLLED, then card.controller is None
+    - For all player_id, state in _players.items():
+        * If state.first_card is not None:
+            - The card at state.first_card position has state CONTROLLED
+            - The card's controller == player_id
+        * If state.second_card is not None:
+            - The card at state.second_card position has state CONTROLLED
+            - The card's controller == player_id
+
+    Safety from Rep Exposure:
+    - All fields are private (prefixed with _)
+    - _board is a private mutable list; never returned directly to clients
+    - _players is a private mutable dictionary; never returned directly to clients
+    - _lock, _card_available, and _watchers are private and not exposed
+    - All public methods return immutable strings or await on operations
+    - look() and flip() return string representations, not references to internal state
+    - Card and PlayerState objects are never exposed outside the class
+    - All mutations are protected by asyncio.Lock to ensure thread safety
+
+    Thread Safety:
+    - All public methods acquire _lock before accessing or modifying shared state
+    - Condition variables (_card_available) coordinate waiting between concurrent players
+    - _notify_watchers() safely notifies all waiting watch() callers
     """
 
     def __init__(self, rows: int, cols: int, cards: list[str]):
         """
         Create a new board with the given dimensions and cards.
+
+        Preconditions:
+        - rows > 0
+        - cols > 0
+        - len(cards) == rows * cols
+        - All card values are non-empty strings with no whitespace
+
+        Postconditions:
+        - Creates a board with dimensions rows x cols
+        - All cards are initialized face down (CardState.DOWN)
+        - No cards are controlled by any player
+        - _players dictionary is empty
+        - Representation invariant is satisfied
 
         Args:
             rows: Number of rows in the board (positive integer)
@@ -78,7 +123,17 @@ class Board:
         self._check_rep()
 
     def _check_rep(self) -> None:
-        """Check that the representation invariant is maintained."""
+        """
+        Check that the representation invariant is maintained.
+
+        Preconditions:
+        - None (can be called at any time)
+
+        Postconditions:
+        - If representation invariant holds, returns normally
+        - If representation invariant violated, raises AssertionError
+        - Board state is unchanged
+        """
         assert self._rows > 0, "Board must have positive rows"
         assert self._cols > 0, "Board must have positive columns"
         assert len(self._board) == self._rows, "Board row count mismatch"
@@ -115,6 +170,18 @@ class Board:
         """
         Get the current state of the board from a player's perspective.
 
+        Preconditions:
+        - player_id is a non-empty string
+
+        Postconditions:
+        - Returns string representation of board state
+        - Board state is unchanged
+        - Format: first line is "{rows}x{cols}", followed by one line per card:
+          * "none" for removed cards
+          * "down" for face-down cards
+          * "my {value}" for cards controlled by this player
+          * "up {value}" for face-up cards (not controlled by this player)
+
         Args:
             player_id: ID of the player looking at the board
 
@@ -126,7 +193,23 @@ class Board:
             return self._format_board(player_id)
 
     def _format_board(self, player_id: str) -> str:
-        """Format the board state as a string for the given player."""
+        """
+        Format the board state as a string for the given player.
+
+        Preconditions:
+        - player_id is a non-empty string
+        - Must be called while holding _lock
+
+        Postconditions:
+        - Returns formatted string representation
+        - Board state is unchanged
+
+        Args:
+            player_id: ID of the player viewing the board
+
+        Returns:
+            Multi-line string with board dimensions and card states
+        """
         lines = [f"{self._rows}x{self._cols}"]
 
         for row in self._board:
@@ -143,7 +226,44 @@ class Board:
         return "\n".join(lines)
 
     async def flip(self, player_id: str, row: int, col: int) -> str:
-        """Flip a card for a player, following rules 1-A to 2-E, 3-A/B."""
+        """
+        Flip a card for a player, following rules 1-A to 2-E, 3-A/B.
+
+        Preconditions:
+        - player_id is a non-empty string
+        - 0 <= row < _rows
+        - 0 <= col < _cols
+
+        Postconditions:
+        - If flipping first card (Rule 1):
+          * Previous matched cards are removed (Rule 3-A)
+          * Previous mismatched uncontrolled cards turn face down (Rule 3-B)
+          * If card doesn't exist: raises ValueError (Rule 1-A)
+          * If card is face down: turns face up, player controls it (Rule 1-B)
+          * If card is face up and uncontrolled: player controls it (Rule 1-C)
+          * If card is face up and controlled: waits until available (Rule 1-D)
+        - If flipping second card (Rule 2):
+          * If card doesn't exist: raises ValueError, relinquishes first (Rule 2-A)
+          * If card is controlled: raises ValueError, relinquishes first (Rule 2-B)
+          * If card is face down: turns face up (Rule 2-C)
+          * If cards match: player keeps both (Rule 2-D)
+          * If cards don't match: relinquishes both, stay face up (Rule 2-E)
+        - Returns updated board state as string
+        - All watchers are notified of board change
+        - Representation invariant is maintained
+
+        Args:
+            player_id: ID of the player flipping the card
+            row: Row index of the card
+            col: Column index of the card
+
+        Returns:
+            String representation of updated board state
+
+        Raises:
+            ValueError: If position is invalid, card doesn't exist, card is controlled
+                       (second flip), or trying to flip same card twice
+        """
         if not (0 <= row < self._rows and 0 <= col < self._cols):
             raise ValueError(f"Invalid position ({row}, {col})")
 
@@ -265,13 +385,36 @@ class Board:
             return self._format_board(player_id)
 
     def _remove_card(self, pos: tuple):
-        """Remove a card from the board."""
+        """
+        Remove a card from the board.
+
+        Preconditions:
+        - Must be called while holding _lock
+        - pos is a tuple (row, col)
+
+        Postconditions:
+        - Card at position pos is set to None if position is valid
+        - Board state is modified
+        """
         r, c = pos
         if 0 <= r < len(self._board) and 0 <= c < len(self._board[0]):
             self._board[r][c] = None
 
     async def _cleanup_previous_move(self, player_id: str):
-        """Cleanup after previous move (must be called within lock)."""
+        """
+        Cleanup after previous move (must be called within lock).
+
+        Preconditions:
+        - Must be called while holding _lock
+        - player_id exists in _players
+
+        Postconditions:
+        - If previous move was a match (Rule 3-A): matched cards removed from board
+        - If previous move was not a match (Rule 3-B): uncontrolled cards turned face down
+        - Player's first_card, second_card reset to None
+        - Player's matched flag reset to False
+        - Waiting players on affected cards are notified
+        """
         state = self._players[player_id]
 
         if state.matched and state.first_card and state.second_card:
@@ -305,7 +448,18 @@ class Board:
             state.second_card = None
 
     def _relinquish_card(self, pos: tuple[int, int]):
-        """Relinquish control of a card (must be called within lock)."""
+        """
+        Relinquish control of a card (must be called within lock).
+
+        Preconditions:
+        - Must be called while holding _lock
+        - pos is a valid tuple (row, col)
+
+        Postconditions:
+        - If card exists and is controlled: card state changed to UP, controller cleared
+        - Waiting players on this card are notified
+        - Board state is modified
+        """
         row, col = pos
         card = self._board[row][col]
         if card and card.state == CardState.CONTROLLED:
@@ -316,13 +470,41 @@ class Board:
                 self._card_available[pos].notify_all()
 
     def _notify_watchers(self):
-        """Notify watchers with actual board state."""
+        """
+        Notify all watchers that the board has changed.
+
+        Preconditions:
+        - Must be called while holding _lock
+
+        Postconditions:
+        - All pending watch() futures are completed
+        - _watchers set is cleared
+        - Watching clients will receive updated board state
+        """
         for watcher in self._watchers:
             if not watcher.done():
                 watcher.set_result("")  # can update with actual board if needed
         self._watchers.clear()
 
     async def watch(self, player_id: str) -> str:
+        """
+        Wait for the board to change, then return the new state.
+
+        Preconditions:
+        - player_id is a non-empty string
+
+        Postconditions:
+        - Blocks until another player modifies the board
+        - Returns string representation of updated board state
+        - Board state is unchanged by this operation
+        - Multiple watchers can wait concurrently
+
+        Args:
+            player_id: ID of the player watching the board
+
+        Returns:
+            String representation of the board state after a change
+        """
         future = asyncio.Future()
         async with self._lock:
             self._watchers.add(future)
@@ -338,6 +520,16 @@ class Board:
     async def parse_from_file(filename: str) -> 'Board':
         """
         Create a new board by parsing a file.
+
+        Preconditions:
+        - filename is a valid path to a readable file
+        - File format: first line is "{rows}x{cols}", followed by rows*cols card values
+        - Card values are non-empty strings with no whitespace
+
+        Postconditions:
+        - Returns a new Board instance initialized with the file contents
+        - All cards are face down, no cards controlled
+        - Representation invariant of returned Board is satisfied
 
         Args:
             filename: Path to game board file
