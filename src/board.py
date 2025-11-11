@@ -216,9 +216,11 @@ class Board:
             if first_card.value == card.value:
                 player_state.matched = True
             else:
-                # 2-E: Mismatch - relinquish both
+                # 2-E: Mismatch - relinquish both cards
                 self._relinquish_card(first_pos)
+                self._relinquish_card((row, col))  # Add this line to relinquish second card
                 player_state.first_card = None
+                player_state.second_card = None  # Also clear second_card reference
                 player_state.matched = False
 
             self._notify_watchers()
