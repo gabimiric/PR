@@ -7,3 +7,5 @@ frozenlist
 idna
 multidict
 yarl
+pytest
+pytest-asyncio
