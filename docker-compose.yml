@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  leader:
+    build: .
+    container_name: kv-leader
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - WRITE_QUORUM=3
+      - MIN_DELAY=0
+      - MAX_DELAY=1000
+      - FOLLOWERS=http://follower1:5001,http://follower2:5002,http://follower3:5003,http://follower4:5004,http://follower5:5005
+    command: uvicorn leader:app --host 0.0.0.0 --port 5000
+    networks:
+      - kv-network
+    depends_on:
+      - follower1
+      - follower2
+      - follower3
+      - follower4
+      - follower5
+
+  follower1:
+    build: .
+    container_name: kv-follower1
+    ports:
+      - "5001:5001"
+    environment:
+      - PORT=5001
+      - NODE_NAME=follower1
+    command: uvicorn follower:app --host 0.0.0.0 --port 5001
+    networks:
+      - kv-network
+
+  follower2:
+    build: .
+    container_name: kv-follower2
+    ports:
+      - "5002:5002"
+    environment:
+      - PORT=5002
+      - NODE_NAME=follower2
+    command: uvicorn follower:app --host 0.0.0.0 --port 5002
+    networks:
+      - kv-network
+
+  follower3:
+    build: .
+    container_name: kv-follower3
+    ports:
+      - "5003:5003"
+    environment:
+      - PORT=5003
+      - NODE_NAME=follower3
+    command: uvicorn follower:app --host 0.0.0.0 --port 5003
+    networks:
+      - kv-network
+
+  follower4:
+    build: .
+    container_name: kv-follower4
+    ports:
+      - "5004:5004"
+    environment:
+      - PORT=5004
+      - NODE_NAME=follower4
+    command: uvicorn follower:app --host 0.0.0.0 --port 5004
+    networks:
+      - kv-network
+
+  follower5:
+    build: .
+    container_name: kv-follower5
+    ports:
+      - "5005:5005"
+    environment:
+      - PORT=5005
+      - NODE_NAME=follower5
+    command: uvicorn follower:app --host 0.0.0.0 --port 5005
+    networks:
+      - kv-network
+
+networks:
+  kv-network:
+    driver: bridge
+
