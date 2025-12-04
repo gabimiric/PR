@@ -149,3 +149,7 @@ This script:
 - **Quorum 3**: ~450ms average latency (waits for 3rd fastest)
 - **Quorum 4**: ~500ms average latency (waits for 4th fastest)
 - **Quorum 5**: ~700ms average latency (waits for all followers)
+
+**Results after running the analysis:**
+<img width="1000" height="600" alt="Figure_1" src="https://github.com/user-attachments/assets/8bb9445f-e8ba-4bd0-a790-9e268cd328d6" />
+
